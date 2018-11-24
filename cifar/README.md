@@ -100,10 +100,11 @@ python3 train_rl.py test [ARCH] -d [DATASET] --resume [HRL-CHECKPOINT] --gate-ty
 ```
 
 
+#### my note
+<!-- python train_base.py test cifar10_rnn_gate_rl_110 --resume weights/resnet-110-rnn-cifar10.pth.tar -->
+python3 train_rl.py test cifar10_rnn_gate_rl_38 --resume ./weights/resnet-38-rnn-cifar10.pth.tar --gate-type rnn
 
 
+如果.cuda那里执行时间超过了1min, 是pytorch安装的问题, [参考这里](https://github.com/pytorch/pytorch/issues/537)或[这里](https://discuss.pytorch.org/t/model-cuda-takes-long-time/102/13)
 
-
-
-
-
+在官网下载whl文件安装，即可解决，正常情况下只要这2s左右就可以完成.cuda()操作
