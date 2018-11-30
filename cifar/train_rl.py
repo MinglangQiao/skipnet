@@ -19,6 +19,10 @@ import models
 from data import *
 import pdb
 
+### add by minglang
+import time
+
+
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith('__')
                      and callable(models.__dict__[name]))
@@ -335,6 +339,8 @@ def validate(args, test_loader, model):
         if skip_ratios.len != len(skips):
             skip_ratios.set_len(len(skips))
 
+        print('>>>>>>>>>validate image: {}/{}'.format(i, len(test_loader)))
+
         # measure accuracy and record loss
         prec1, = accuracy(output.data, target, topk=(1,))
         top1.update(prec1[0], input.size(0))
@@ -373,9 +379,19 @@ def validate(args, test_loader, model):
 
 
 def test_model(args):
+
+    start_time = time.time()
+    print('>>>>>>>>> load the model ... ')
+    print('>> args.pretrained： {}, arch: {}, models: {}'.format(
+        args.pretrained, args.arch, models.__dict__[args.arch]))
+    # print(t)
+
     # create model
-    model = models.__dict__[args.arch](args.pretrained).cuda()
+    model = models.__dict__[args.arch](args.pretrained).cuda() ## most time cost in here
     model = torch.nn.DataParallel(model)
+
+    print('model loaded， time cost: {:.3f} s'.format(time.time()-start_time))
+    # print(t)
 
     if args.resume:
         if os.path.isfile(args.resume):
@@ -396,6 +412,7 @@ def test_model(args):
                                     shuffle=False,
                                     num_workers=args.workers)
 
+    print('>>>>>>>> start validate!')
     validate(args, test_loader, model)
 
 

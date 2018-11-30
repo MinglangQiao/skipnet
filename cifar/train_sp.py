@@ -9,21 +9,22 @@ import torch.nn as nn
 import torch.backends.cudnn as cudnn
 from torch.autograd import Variable
 
+#
 import os
 import shutil
 import argparse
 import time
 import logging
-
+#
 import models
 from data import *
-
+#
+import matplotlib.pyplot as plt
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith('__')
                      and callable(models.__dict__[name])
                      )
-
 
 def parse_args():
     # hyper-parameters are from ResNet paper
@@ -110,6 +111,9 @@ def run_training(args):
 
     best_prec1 = 0
 
+    # Train_Batch_Size = 128
+    OUPUT_SIZE = (80, 80)
+
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -125,24 +129,42 @@ def run_training(args):
             logging.info('=> no checkpoint found at `{}`'.format(args.resume))
 
     cudnn.benchmark = True
+    
+    # train_loader = prepare_train_data(dataset=args.dataset,
+    #                                   batch_size=args.batch_size,
+    #                                   shuffle=True,
+    #                                   num_workers=args.workers)
+    # test_loader = prepare_test_data(dataset=args.dataset,
+    #                                 batch_size=args.batch_size,
+    #                                 shuffle=False,
+    #                                 num_workers=args.workers)
 
-    train_loader = prepare_train_data(dataset=args.dataset,
-                                      batch_size=args.batch_size,
-                                      shuffle=True,
-                                      num_workers=args.workers)
-    test_loader = prepare_test_data(dataset=args.dataset,
-                                    batch_size=args.batch_size,
-                                    shuffle=False,
-                                    num_workers=args.workers)
+    train_loader = DataLoader(mode='Train',
+                              batch_size=Train_Batch_Size)
+    test_loader = DataLoader(mode='Test',
+                            batch_size=Test_Batch_Size)
+    num_batch = round(train_loader .num_batches)
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda()
+    # criterion = nn.CrossEntropyLoss().cuda()
+    ## define loss and optimizer
+    if Mode_Loss == 'KLDivLoss':
+        criterion = nn.KLDivLoss(size_average=False).cuda() ### refer to: https://pytorch.org/docs/master/nn.html?highlight=log_softmax#torch.nn.LogSoftmax
+    elif Mode_Loss == 'BCELoss':
+        criterion = nn.BCELoss().cuda()
+
+    if Mode_log_visdom == True:
+        from visdom import Visdom
+        vis = Visdom()
+        vis.close()
 
     optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad,
                                        model.parameters()),
                                 args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
+    soft_max =  nn.Softmax()
+    log_softmax = nn.LogSoftmax()
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -151,87 +173,140 @@ def run_training(args):
     skip_ratios = ListAverageMeter()
 
     end = time.time()
-    for i in range(args.start_iter, args.iters):
-        model.train()
-        adjust_learning_rate(args, optimizer, i)
+    for i_epoch in range(N_epoch):
 
-        input, target = next(iter(train_loader))
-        # measuring data loading time
-        data_time.update(time.time() - end)
+        for i in range(num_batch): # args.start_iter, args.iters
+            model.train()
+            adjust_learning_rate(args, optimizer, i)
 
-        target = target.cuda(async=False)
-        input_var = Variable(input).cuda()
-        target_var = Variable(target).cuda()
+            # input, target = next(iter(train_loader))
+            (input, target, one_batch_image_name) = train_loader.get_batch()
+            # measuring data loading time
+            data_time.update(time.time() - end)
 
-        # compute output
-        output, masks, logprobs = model(input_var)
+            target = target.cuda(async=False)
+            input_var = Variable(input).cuda()
 
-        # collect skip ratio of each layer
-        skips = [mask.data.le(0.5).float().mean() for mask in masks]
-        if skip_ratios.len != len(skips):
-            skip_ratios.set_len(len(skips))
+            target_var = Variable(target).cuda().squeeze().type(torch.FloatTensor)
+            ## no need to be softmax, batch map has been normalized as probabilities
+            target_var = target_var.view(Train_Batch_Size, -1) ## may need a softmax
+            # target_var = soft_max(target_var) do not softmax
+            # test_target = target_var.data.cpu().numpy() ## for debug
 
-        loss = criterion(output, target_var)
+            optimizer.zero_grad()
 
-        # measure accuracy and record loss
-        prec1, = accuracy(output.data, target, topk=(1,))
-        losses.update(loss.data[0], input.size(0))
-        top1.update(prec1[0], input.size(0))
-        skip_ratios.update(skips, input.size(0))
+            # compute output
+            output, masks, logprobs = model(input_var)
+            output = output.cuda().squeeze().type(torch.FloatTensor)
+            output = output.view(Train_Batch_Size, -1)
 
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            if Mode_Loss == 'KLDivLoss':
+                outputs_map = soft_max(output)  ## for saliency map
+                output = log_softmax(output)  ## for cal KLD loss
+            elif Mode_Loss == 'BCELoss':
+                outputs_map = soft_max(output)
 
-        # repackage hidden units for RNN Gate
-        if args.gate_type == 'rnn':
-            model.module.control.repackage_hidden()
+            # collect skip ratio of each layer
+            skips = [mask.data.le(0.5).float().mean() for mask in masks]
+            if skip_ratios.len != len(skips):
+                skip_ratios.set_len(len(skips))
 
-        batch_time.update(time.time() - end)
-        end = time.time()
+            if Mode_Loss == 'KLDivLoss':
+                loss = criterion(output, target_var) / Train_Batch_Size
+            elif Mode_Loss == 'BCELoss':
+                loss = criterion(outputs_map, batch_map)
 
-        # print log
-        if i % args.print_freq == 0 or i == (args.iters - 1):
-            logging.info("Iter: [{0}/{1}]\t"
-                         "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
-                         "Data {data_time.val:.3f} ({data_time.avg:.3f})\t"
-                         "Loss {loss.val:.3f} ({loss.avg:.3f})\t"
-                         "Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t".format(
-                            i,
-                            args.iters,
-                            batch_time=batch_time,
-                            data_time=data_time,
-                            loss=losses,
-                            top1=top1)
-            )
-            for idx in range(skip_ratios.len):
-                logging.info(
-                    "{} layer skipping = {:.3f}({:.3f})".format(
-                        idx,
-                        skip_ratios.val[idx],
-                        skip_ratios.avg[idx],
-                    )
-                )
+            # measure accuracy and record loss
+            # prec1, = accuracy(output.data, target, topk=(1,))
+            # losses.update(loss.data[0], input.size(0))
+            # print('>>>>>>>> loss: {:.3f}'.format(loss.data[0]))
+            # print(t)
+            # top1.update(prec1[0], input.size(0))
+            # top1 = 0
+            skip_ratios.update(skips, input.size(0))
 
-        # evaluate every 1000 steps
-        if (i % args.eval_every == 0 and i > 0) or (i == (args.iters-1)):
-            prec1 = validate(args, test_loader, model, criterion)
-            is_best = prec1 > best_prec1
-            best_prec1 = max(prec1, best_prec1)
-            checkpoint_path = os.path.join(args.save_path,
-                                           'checkpoint_{:05d}.pth.tar'.format(
-                                               i))
-            save_checkpoint({
-                'iter': i,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_prec1': best_prec1,
-            },
-                is_best, filename=checkpoint_path)
-            shutil.copyfile(checkpoint_path, os.path.join(args.save_path,
-                                                          'checkpoint_latest'
-                                                          '.pth.tar'))
+            # compute gradient and do SGD step
+            loss.backward()
+            optimizer.step()
+
+            # repackage hidden units for RNN Gate
+            if args.gate_type == 'rnn':
+                model.module.control.repackage_hidden()
+
+            batch_time.update(time.time() - end)
+            end = time.time()
+
+            ## for debug
+            outputs_map = output.view(Train_Batch_Size, OUPUT_SIZE[1], OUPUT_SIZE[0]).detach().data.cpu().numpy()
+
+            # outputs_saliency_map = process_output(outputs_map) ## this fucntion may be time consuming
+            # plt.imshow(outputs_saliency_map[0])
+            # plt.show()
+
+            recorde(name='training_loss', value=loss.data[0], data_type='line')
+
+            if i % args.print_freq == 0 or i == (args.iters - 1):
+                print('epoch： %d, i_batch: %5d,  loss: %.6f' %(i_epoch + 1, i + 1, loss.data[0]))
+
+                if Mode_log_visdom == True:
+                    batch_map_for_visdom = target_var.view(Train_Batch_Size, OUPUT_SIZE[1], 
+                                                           OUPUT_SIZE[0]).detach().data.cpu().numpy()
+
+                    recorde(name='ground_hmap', value=batch_map_for_visdom[0], data_type='heatmap')
+                    recorde(name='predict_hmap', value=outputs_map[0], data_type='heatmap')
+                    # print(np.shape(input[0].numpy()))
+                    image1 = input[0].numpy() * 255 + MEAN_VALUE
+                    # image1 = np.transpose(image1, (1, 2, 0)).astype(np.dtype(int))
+                    # print(np.shape(image1))
+                    # plt.imshow(image1)
+                    # plt.show()
+                    # vis.image(image1)
+                    recorde(name='ground_image', value=image1, data_type='image')
+                    log_visdom(vis)
+
+
+            # print log
+            # if i % args.print_freq == 0 or i == (args.iters - 1):
+            #     # logging.info("Iter: [{0}/{1}]\t"
+            #     #              "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
+            #     #              "Data {data_time.val:.3f} ({data_time.avg:.3f})\t"
+            #     #              "Loss {loss.val:.3f} ({loss.avg:.3f})\t"
+            #     #              "Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t".format(
+            #     #                 i,
+            #     #                 args.iters,
+            #     #                 batch_time=batch_time,
+            #     #                 data_time=data_time,
+            #     #                 loss=losses,
+            #     #                 top1=top1)
+            #     # )
+            #
+            #     for idx in range(skip_ratios.len):
+            #         logging.info(
+            #             "{} layer skipping = {:.3f}({:.3f})".format(
+            #                 idx,
+            #                 skip_ratios.val[idx],
+            #                 skip_ratios.avg[idx],
+            #             )
+            #         )
+
+            # evaluate every 1000 steps
+            # if (i % args.eval_every == 0 and i > 0) or (i == (args.iters-1)):
+            #     prec1 = validate(args, test_loader, model, criterion)
+            #     is_best = prec1 > best_prec1
+            #     best_prec1 = max(prec1, best_prec1)
+            #     checkpoint_path = os.path.join(args.save_path,
+            #                                    'checkpoint_{:05d}.pth.tar'.format(
+            #                                        i))
+            #     save_checkpoint({
+            #         'iter': i,
+            #         'arch': args.arch,
+            #         'state_dict': model.state_dict(),
+            #         'best_prec1': best_prec1,
+            #     },
+            #         is_best, filename=checkpoint_path)
+            #     shutil.copyfile(checkpoint_path, os.path.join(args.save_path,
+            #                                                   'checkpoint_latest'
+            #                                                   '.pth.tar'))
 
 
 def validate(args, test_loader, model, criterion):

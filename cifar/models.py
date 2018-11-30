@@ -536,17 +536,17 @@ class RNNGate(nn.Module):
     def __init__(self, input_dim, hidden_dim, rnn_type='lstm'):
         super(RNNGate, self).__init__()
         self.rnn_type = rnn_type
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
+        self.input_dim = input_dim * 100
+        self.hidden_dim = hidden_dim * 100
 
         if self.rnn_type == 'lstm':
-            self.rnn = nn.LSTM(input_dim, hidden_dim)
+            self.rnn = nn.LSTM(input_dim*100, hidden_dim*100)
         else:
             self.rnn = None
         self.hidden = None
 
         # reduce dim
-        self.proj = nn.Linear(hidden_dim, 1)
+        self.proj = nn.Linear(hidden_dim*100, 1)
         self.prob = nn.Sigmoid()
 
     def init_hidden(self, batch_size):
@@ -579,8 +579,8 @@ class SoftRNNGate(nn.Module):
     def __init__(self, input_dim, hidden_dim, rnn_type='lstm'):
         super(SoftRNNGate, self).__init__()
         self.rnn_type = rnn_type
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
+        self.input_dim = input_dim 
+        self.hidden_dim = hidden_dim 
 
         if self.rnn_type == 'lstm':
             self.rnn = nn.LSTM(input_dim, hidden_dim)
@@ -619,7 +619,7 @@ class SoftRNNGate(nn.Module):
 class ResNetRecurrentGateSP(nn.Module):
     """SkipNet with Recurrent Gate Model"""
     def __init__(self, block, layers, num_classes=10, embed_dim=10,
-                 hidden_dim=10, gate_type='rnn'):
+                 hidden_dim=10, gate_type='rnn'): 
         self.inplanes = 16
         super(ResNetRecurrentGateSP, self).__init__()
 
@@ -646,6 +646,7 @@ class ResNetRecurrentGateSP(nn.Module):
 
         self.avgpool = nn.AvgPool2d(8)
         self.fc = nn.Linear(64 * block.expansion, num_classes)
+        self.salmap_layer = nn.Conv2d(64, 1, kernel_size=1, stride=1)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -713,7 +714,7 @@ class ResNetRecurrentGateSP(nn.Module):
         x = getattr(self, 'group1_layer0')(x)
         # gate takes the output of the current layer
 
-        gate_feature = getattr(self, 'group1_gate0')(x)
+        gate_feature = getattr(self, 'group1_gate0')(x) ## should be gate1? but dose not influence, as g1 and g0 is different objetc of the same class 
         mask, gprob = self.control(gate_feature)
         gprobs.append(gprob)
         masks.append(mask.squeeze())
@@ -729,15 +730,17 @@ class ResNetRecurrentGateSP(nn.Module):
                            + (1 - mask).expand_as(prev) * prev
                 gate_feature = getattr(self, 'group{}_gate{}'.format(g+1, i))(x)
                 mask, grob = self.control(gate_feature)
-                gprobs.append(gprob)
+                gprobs.append(gprob) ## here is  a typo, should be grob instead of gprob
                 masks.append(mask.squeeze())
 
         # last block doesn't have gate module
         del masks[-1]
 
-        x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
+        x = self.salmap_layer(x)
+        
+        # x = self.avgpool(x)
+        # x = x.view(x.size(0), -1)
+        # x = self.fc(x)
 
         return x, masks, gprobs
 
@@ -1318,3 +1321,127 @@ def cifar100_rnn_gate_rl_110(pretrained=False, **kwargs):
     return model
 
 
+# class ResNetRecurrentGateSP(nn.Module):
+#     """SkipNet with Recurrent Gate Model"""
+#     def __init__(self, block, layers, num_classes=10, embed_dim=10,
+#                  hidden_dim=10, gate_type='rnn'):
+#         self.inplanes = 16
+#         super(ResNetRecurrentGateSP, self).__init__()
+#
+#         self.num_layers = layers
+#         self.conv1 = conv3x3(3, 16)
+#         self.bn1 = nn.BatchNorm2d(16)
+#         self.relu = nn.ReLU(inplace=True)
+#
+#         self.embed_dim = embed_dim
+#         self.hidden_dim = hidden_dim
+#
+#         self._make_group(block, 16, layers[0], group_id=1, pool_size=32)
+#         self._make_group(block, 32, layers[1], group_id=2, pool_size=16)
+#         self._make_group(block, 64, layers[2], group_id=3, pool_size=8)
+#
+#         # define recurrent gating module
+#         if gate_type == 'rnn':
+#             self.control = RNNGate(embed_dim, hidden_dim, rnn_type='lstm')
+#         elif gate_type == 'soft':
+#             self.control = SoftRNNGate(embed_dim, hidden_dim, rnn_type='lstm')
+#         else:
+#             print('gate type {} not implemented'.format(gate_type))
+#             self.control = None
+#
+#         self.avgpool = nn.AvgPool2d(8)
+#         self.fc = nn.Linear(64 * block.expansion, num_classes)
+#
+#         for m in self.modules():
+#             if isinstance(m, nn.Conv2d):
+#                 n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+#                 m.weight.data.normal_(0, math.sqrt(2. / n))
+#             elif isinstance(m, nn.BatchNorm2d):
+#                 m.weight.data.fill_(1)
+#                 m.bias.data.zero_()
+#             elif isinstance(m, nn.Linear):
+#                 n = m.weight.size(0) * m.weight.size(1)
+#                 m.weight.data.normal_(0, math.sqrt(2. / n))
+#
+#     def _make_group(self, block, planes, layers, group_id=1, pool_size=16):
+#         """ Create the whole group"""
+#         for i in range(layers):
+#             if group_id > 1 and i == 0:
+#                 stride = 2
+#             else:
+#                 stride = 1
+#
+#             meta = self._make_layer_v2(block, planes, stride=stride,
+#                                        pool_size=pool_size)
+#
+#             setattr(self, 'group{}_ds{}'.format(group_id, i), meta[0])
+#             setattr(self, 'group{}_layer{}'.format(group_id, i), meta[1])
+#             setattr(self, 'group{}_gate{}'.format(group_id, i), meta[2])
+#
+#     def _make_layer_v2(self, block, planes, stride=1, pool_size=16):
+#         """ create one block and optional a gate module """
+#         downsample = None
+#         if stride != 1 or self.inplanes != planes * block.expansion:
+#             downsample = nn.Sequential(
+#                 nn.Conv2d(self.inplanes, planes * block.expansion,
+#                           kernel_size=1, stride=stride, bias=False),
+#                 nn.BatchNorm2d(planes * block.expansion),
+#
+#             )
+#         layer = block(self.inplanes, planes, stride, downsample)
+#         self.inplanes = planes * block.expansion
+#
+#         gate_layer = nn.Sequential(
+#             nn.AvgPool2d(pool_size),
+#             nn.Conv2d(in_channels=planes * block.expansion,
+#                       out_channels=self.embed_dim,
+#                       kernel_size=1,
+#                       stride=1))
+#         if downsample:
+#             return downsample, layer, gate_layer
+#         else:
+#             return None, layer, gate_layer
+#
+#     def forward(self, x):
+#
+#         batch_size = x.size(0)
+#         x = self.conv1(x)
+#         x = self.bn1(x)
+#         x = self.relu(x)
+#
+#         # reinitialize hidden units
+#         self.control.hidden = self.control.init_hidden(batch_size)
+#
+#         masks = []
+#         gprobs = []
+#         # must pass through the first layer in first group
+#         x = getattr(self, 'group1_layer0')(x)
+#         # gate takes the output of the current layer
+#
+#         gate_feature = getattr(self, 'group1_gate0')(x) ## should be gate1? but dose not influence, as g1 and g0 is different objetc of the same class
+#         mask, gprob = self.control(gate_feature)
+#         gprobs.append(gprob)
+#         masks.append(mask.squeeze())
+#         prev = x  # input of next layer
+#
+#         for g in range(3):
+#             for i in range(0 + int(g == 0), self.num_layers[g]):
+#                 if getattr(self, 'group{}_ds{}'.format(g+1, i)) is not None:
+#                     prev = getattr(self, 'group{}_ds{}'.format(g+1, i))(prev)
+#                 x = getattr(self, 'group{}_layer{}'.format(g+1, i))(x)
+#                 # new mask is taking the current output
+#                 prev = x = mask.expand_as(x) * x \
+#                            + (1 - mask).expand_as(prev) * prev
+#                 gate_feature = getattr(self, 'group{}_gate{}'.format(g+1, i))(x)
+#                 mask, grob = self.control(gate_feature)
+#                 gprobs.append(gprob) ## here is  a typo, should be grob instead of gprob
+#                 masks.append(mask.squeeze())
+#
+#         # last block doesn't have gate module
+#         del masks[-1]
+#
+#         x = self.avgpool(x)
+#         # x = x.view(x.size(0), -1)
+#         # x = self.fc(x)
+#
+#         return x, masks, gprobs

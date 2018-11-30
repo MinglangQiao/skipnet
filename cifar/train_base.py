@@ -22,7 +22,8 @@ model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith('__')
                      and callable(models.__dict__[name])
                      )
-
+# print('>>>>> model_names: {}'.format(model_names))
+# print(t)
 
 def parse_args():
     # hyper-parameters are from ResNet paper
@@ -74,6 +75,9 @@ def main():
     save_path = args.save_path = os.path.join(args.save_folder, args.arch)
     if not os.path.exists(save_path):
         os.makedirs(save_path)
+
+    # print('>>>>>>> save_path：{}, {}'.format(save_path, args.save_path))
+    # print(t)
 
     # config logging file
     args.logger_file = os.path.join(save_path, 'log_{}.txt'.format(args.cmd))
